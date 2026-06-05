@@ -1,11 +1,35 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDocumentProxy, getMeta } from "unpdf";
+import { classifyAndMap, type DocumentMapping } from "@/lib/documents";
+import { ocrPdf, TEXT_THRESHOLD } from "@/lib/ocr";
 
 // PDF parsing relies on Node APIs, so force the Node.js runtime.
 export const runtime = "nodejs";
 
 const MAX_BYTES = 25 * 1024 * 1024; // 25 MB per file
-const MAX_FILES = 50;
+const MAX_FILES = 500;
+const CONCURRENCY = 5; // parse this many PDFs at once to cap memory use
+
+// Run an async mapper over items with a bounded number of concurrent workers,
+// preserving input order in the results.
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return results;
+}
 
 type FileResult =
   | {
@@ -15,6 +39,10 @@ type FileResult =
       totalPages: number;
       text: string;
       info: Record<string, unknown>;
+      // True when the text was recovered via OCR (scanned/image-only PDF).
+      ocrUsed: boolean;
+      // Detected document type + mapped fields, or null if unrecognised.
+      mapping: DocumentMapping | null;
     }
   | {
       ok: false;
@@ -118,22 +146,20 @@ async function extractFormattedText(
   return { totalPages, text };
 }
 
-async function parseFile(file: File): Promise<FileResult> {
+async function parseFile(input: {
+  file: File;
+  name: string;
+}): Promise<FileResult> {
+  const { file, name } = input;
   const isPdf =
-    file.type === "application/pdf" ||
-    file.name.toLowerCase().endsWith(".pdf");
+    file.type === "application/pdf" || name.toLowerCase().endsWith(".pdf");
   if (!isPdf) {
-    return {
-      ok: false,
-      fileName: file.name,
-      fileSize: file.size,
-      error: "Not a PDF file.",
-    };
+    return { ok: false, fileName: name, fileSize: file.size, error: "Not a PDF file." };
   }
   if (file.size > MAX_BYTES) {
     return {
       ok: false,
-      fileName: file.name,
+      fileName: name,
       fileSize: file.size,
       error: "File is too large (max 25 MB).",
     };
@@ -142,23 +168,47 @@ async function parseFile(file: File): Promise<FileResult> {
   try {
     const buffer = new Uint8Array(await file.arrayBuffer());
     const pdf = await getDocumentProxy(buffer);
-    const [{ totalPages, text }, meta] = await Promise.all([
+    const [extracted, meta] = await Promise.all([
       extractFormattedText(pdf),
       getMeta(pdf),
     ]);
+
+    const { totalPages } = extracted;
+    let text = extracted.text;
+    let ocrUsed = false;
+
+    // No usable text layer (e.g. a scanned form) — recover it with OCR so the
+    // document can still be classified and mapped.
+    if (text.replace(/--- Page \d+ ---/g, "").trim().length < TEXT_THRESHOLD) {
+      try {
+        // pdf.js transfers (and detaches) `buffer` to its worker, so OCR needs
+        // its own fresh copy of the bytes.
+        const ocrBuffer = new Uint8Array(await file.arrayBuffer());
+        const ocrText = await ocrPdf(ocrBuffer, totalPages);
+        if (ocrText.length > text.length) {
+          text = ocrText;
+          ocrUsed = true;
+        }
+      } catch (ocrErr) {
+        console.error(`OCR failed for ${name}:`, ocrErr);
+      }
+    }
+
     return {
       ok: true,
-      fileName: file.name,
+      fileName: name,
       fileSize: file.size,
       totalPages,
       text,
       info: meta.info ?? {},
+      ocrUsed,
+      mapping: classifyAndMap(text, name),
     };
   } catch (err) {
-    console.error(`PDF parse error for ${file.name}:`, err);
+    console.error(`PDF parse error for ${name}:`, err);
     return {
       ok: false,
-      fileName: file.name,
+      fileName: name,
       fileSize: file.size,
       error: "Failed to parse — the PDF may be corrupted or encrypted.",
     };
@@ -168,6 +218,9 @@ async function parseFile(file: File): Promise<FileResult> {
 export async function POST(req: NextRequest) {
   const formData = await req.formData();
   const files = formData.getAll("file").filter((f): f is File => f instanceof File);
+  // Parallel list of relative paths (e.g. "reports/q1/file.pdf") so files from
+  // folder uploads keep a distinguishable display name. Falls back to file.name.
+  const paths = formData.getAll("path").map((p) => String(p));
 
   if (files.length === 0) {
     return NextResponse.json({ error: "No files uploaded." }, { status: 400 });
@@ -179,6 +232,10 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const results = await Promise.all(files.map(parseFile));
+  const inputs = files.map((file, i) => ({
+    file,
+    name: paths[i] || file.name,
+  }));
+  const results = await mapLimit(inputs, CONCURRENCY, parseFile);
   return NextResponse.json({ results });
 }
