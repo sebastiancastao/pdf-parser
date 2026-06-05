@@ -185,19 +185,6 @@ export default function Home() {
     [handleFiles],
   );
 
-  const downloadAll = useCallback(() => {
-    for (const r of results) {
-      if (!r.ok) continue;
-      const blob = new Blob([r.text], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = downloadName(r.fileName);
-      a.click();
-      URL.revokeObjectURL(url);
-    }
-  }, [results]);
-
   const [downloadingAwbs, setDownloadingAwbs] = useState(false);
   const [awbError, setAwbError] = useState<string | null>(null);
 
@@ -345,14 +332,6 @@ export default function Home() {
                   {downloadingAwbs
                     ? "Generating…"
                     : `Download all Air Waybills (${awbResults.length})`}
-                </button>
-              )}
-              {okCount > 0 && (
-                <button
-                  onClick={downloadAll}
-                  className="rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700"
-                >
-                  Download all .txt
                 </button>
               )}
             </div>
