@@ -13,56 +13,73 @@ export const runtime = "nodejs";
 const AWB_TEMPLATE_PATH = join(process.cwd(), "public", "awb-template.pdf");
 const IAC_TEMPLATE_PATH = join(process.cwd(), "public", "iac-template.pdf");
 
+// Return raw PDF bytes as a download response.
+function pdfResponse(bytes: Uint8Array, filename: string): NextResponse {
+  const body = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  return new NextResponse(body, {
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+    },
+  });
+}
+
 export async function POST(req: NextRequest) {
   let mapping: DocumentMapping;
+  let carrier: "southwest" | "delta" = "southwest";
   try {
     const body = await req.json();
     mapping = body.mapping;
+    // Carrier chosen in the UI selects the output: Southwest → Air Waybill +
+    // IAC packet; Delta → IAC certification only.
+    if (body.carrier === "delta") carrier = "delta";
   } catch {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const awbValues = mapping ? mappingToAwbValues(mapping) : null;
-  if (!awbValues) {
-    return NextResponse.json(
-      {
-        error:
-          "Filling is only supported for DHL IAC and DHL SameDay ticket documents.",
-      },
-      { status: 400 },
-    );
-  }
+  const iacValues = mapping ? ticketToIacValues(mapping) : null;
 
   try {
-    // 1) Fill the Air Waybill.
+    // Delta: fill the IAC certification only (no Air Waybill).
+    if (carrier === "delta") {
+      if (!iacValues) {
+        return NextResponse.json(
+          { error: "The Delta workflow requires a DHL SameDay ticket." },
+          { status: 400 },
+        );
+      }
+      const iacTemplate = new Uint8Array(await readFile(IAC_TEMPLATE_PATH));
+      const iac = await fillIacForm(iacTemplate, iacValues);
+      return pdfResponse(iac.bytes, "DHL_IAC_filled.pdf");
+    }
+
+    // Southwest: fill the Air Waybill, and merge the IAC in for a ticket.
+    const awbValues = mapping ? mappingToAwbValues(mapping) : null;
+    if (!awbValues) {
+      return NextResponse.json(
+        {
+          error:
+            "Filling is only supported for DHL IAC and DHL SameDay ticket documents.",
+        },
+        { status: 400 },
+      );
+    }
+
     const awbTemplate = new Uint8Array(await readFile(AWB_TEMPLATE_PATH));
     const awb = await fillAwbForm(awbTemplate, awbValues);
     const parts: Uint8Array[] = [awb.bytes];
 
-    // 2) A DHL SameDay ticket also fills the IAC certification — append it so
-    // the download is a single merged packet (Air Waybill + IAC).
-    const iacValues = ticketToIacValues(mapping);
     if (iacValues) {
       const iacTemplate = new Uint8Array(await readFile(IAC_TEMPLATE_PATH));
       const iac = await fillIacForm(iacTemplate, iacValues);
       parts.push(iac.bytes);
     }
 
-    const merged =
-      parts.length > 1 ? await mergePdfs(parts) : awb.bytes;
-
-    // Hand back a plain ArrayBuffer slice — a valid BodyInit regardless of the
-    // Uint8Array's backing buffer type.
-    const body = merged.buffer.slice(
-      merged.byteOffset,
-      merged.byteOffset + merged.byteLength,
-    ) as ArrayBuffer;
-    return new NextResponse(body, {
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": 'attachment; filename="Documents_filled.pdf"',
-      },
-    });
+    const merged = parts.length > 1 ? await mergePdfs(parts) : awb.bytes;
+    return pdfResponse(merged, "Documents_filled.pdf");
   } catch (err) {
     console.error("Document fill failed:", err);
     return NextResponse.json(

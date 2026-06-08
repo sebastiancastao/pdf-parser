@@ -290,6 +290,12 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
         value: agentCity ? `DHL SameDay / Sky Courier, ${agentCity}` : null,
       },
       { label: "Part Number", value: capture(text, /\b(\d{4}-\d{4}-\d{4})\b/) },
+      {
+        // The subcontracted courier ("Vendor: 57126 SKYLINE COURIER LOGT") —
+        // the driver's employer for the IAC certification.
+        label: "Vendor",
+        value: cleanValue(text.match(/Vendor:\s*\d*\s*([^\n]+)/i)?.[1] ?? null),
+      },
     ];
   },
 };

@@ -57,22 +57,29 @@ function downloadName(path: string) {
   return leaf.replace(/\.pdf$/i, "") + ".txt";
 }
 
-// Download name for the filled document(s) generated from a source PDF. A
-// ticket yields a merged Air Waybill + IAC packet; an IAC yields the Air Waybill.
-function filledFileName(path: string, mapping: DocumentMapping) {
+type Carrier = "southwest" | "delta";
+
+// Download name for the filled PDF, by carrier workflow. Southwest yields the
+// merged Air Waybill + IAC; Delta yields the IAC only.
+function filledFileName(path: string, mapping: DocumentMapping, carrier: Carrier) {
   const leaf = path.split("/").pop() ?? path;
-  const suffix =
-    mapping.type === "dhl-sameday-ticket" ? "_AirWaybill_IAC" : "_AirWaybill";
+  let suffix = "_AirWaybill";
+  if (mapping.type === "dhl-sameday-ticket") {
+    suffix = carrier === "delta" ? "_IAC" : "_AirWaybill_IAC";
+  }
   return leaf.replace(/\.pdf$/i, "") + suffix + ".pdf";
 }
 
-// Request the filled PDF for a mapping. The server returns a single PDF — for a
-// ticket it's the Air Waybill and IAC certification merged into one packet.
-async function fetchFilled(mapping: DocumentMapping): Promise<Blob> {
+// Request the filled PDF for a mapping. Southwest returns the merged Air Waybill
+// + IAC packet; Delta returns the IAC certification only.
+async function fetchFilled(
+  mapping: DocumentMapping,
+  carrier: Carrier,
+): Promise<Blob> {
   const res = await fetch("/api/fill-awb", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mapping }),
+    body: JSON.stringify({ mapping, carrier }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -82,9 +89,12 @@ async function fetchFilled(mapping: DocumentMapping): Promise<Blob> {
 }
 
 // Generate and download the filled PDF for one parsed result.
-async function downloadFilledDocs(result: FillableResult) {
-  const blob = await fetchFilled(result.mapping);
-  downloadBlob(blob, filledFileName(result.fileName, result.mapping));
+async function downloadFilledDocs(
+  result: FillableResult,
+  carrier: Carrier = "southwest",
+) {
+  const blob = await fetchFilled(result.mapping, carrier);
+  downloadBlob(blob, filledFileName(result.fileName, result.mapping, carrier));
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -136,77 +146,42 @@ async function walkEntry(entry: FileSystemEntry, out: PickedFile[]) {
 }
 
 export default function Home() {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
-  const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<FileResult[]>([]);
+  // Carrier of the most recent upload, set by which drop zone was used.
+  const [carrier, setCarrier] = useState<Carrier>("southwest");
 
-  // webkitdirectory isn't in React's input typings, so set it on mount.
-  useEffect(() => {
-    const el = folderInputRef.current;
-    if (el) {
-      el.setAttribute("webkitdirectory", "");
-      el.setAttribute("directory", "");
-    }
-  }, []);
-
-  const handleFiles = useCallback(async (picked: PickedFile[]) => {
-    if (picked.length === 0) return;
-    const pdfs = picked.filter(({ file, path }) => isPdf(file, path));
-    if (pdfs.length === 0) {
+  const handleFiles = useCallback(
+    async (picked: PickedFile[], chosen: Carrier) => {
+      if (picked.length === 0) return;
+      const pdfs = picked.filter(({ file, path }) => isPdf(file, path));
+      if (pdfs.length === 0) {
+        setResults([]);
+        setError("No PDF files found in the selection.");
+        return;
+      }
+      setError(null);
       setResults([]);
-      setError("No PDF files found in the selection.");
-      return;
-    }
-    setError(null);
-    setResults([]);
-    setLoading(true);
-    try {
-      const formData = new FormData();
-      for (const { file, path } of pdfs) {
-        formData.append("file", file);
-        formData.append("path", path);
-      }
-      const res = await fetch("/api/parse", { method: "POST", body: formData });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Something went wrong.");
-      setResults(data.results as FileResult[]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unexpected error.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const onDrop = useCallback(
-    async (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragging(false);
-
-      // Collect entries synchronously — the DataTransfer list is cleared once
-      // the handler yields to an await.
-      const entries: FileSystemEntry[] = [];
-      const items = e.dataTransfer.items;
-      if (items?.length) {
-        for (const item of Array.from(items)) {
-          const entry = item.webkitGetAsEntry?.();
-          if (entry) entries.push(entry);
+      setCarrier(chosen);
+      setLoading(true);
+      try {
+        const formData = new FormData();
+        for (const { file, path } of pdfs) {
+          formData.append("file", file);
+          formData.append("path", path);
         }
+        const res = await fetch("/api/parse", { method: "POST", body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Something went wrong.");
+        setResults(data.results as FileResult[]);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Unexpected error.");
+      } finally {
+        setLoading(false);
       }
-
-      const picked: PickedFile[] = [];
-      if (entries.length) {
-        for (const entry of entries) await walkEntry(entry, picked);
-      } else if (e.dataTransfer.files?.length) {
-        for (const file of Array.from(e.dataTransfer.files)) {
-          picked.push({ file, path: file.name });
-        }
-      }
-      handleFiles(picked);
     },
-    [handleFiles],
+    [],
   );
 
   const [downloadingAwbs, setDownloadingAwbs] = useState(false);
@@ -222,7 +197,7 @@ export default function Home() {
     for (const r of results) {
       if (!canFillAwb(r)) continue;
       try {
-        await downloadFilledDocs(r);
+        await downloadFilledDocs(r, carrier);
       } catch {
         failures++;
       }
@@ -231,7 +206,7 @@ export default function Home() {
       setAwbError(`${failures} document${failures > 1 ? "s" : ""} failed to generate.`);
     }
     setDownloadingAwbs(false);
-  }, [results]);
+  }, [results, carrier]);
 
   const okCount = results.filter((r) => r.ok).length;
   const failCount = results.length - okCount;
@@ -246,72 +221,16 @@ export default function Home() {
         </p>
       </header>
 
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={onDrop}
-        className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 text-center transition ${
-          dragging
-            ? "border-blue-500 bg-blue-50 dark:bg-blue-950/30"
-            : "border-gray-300 dark:border-gray-700"
-        }`}
-      >
-        <svg
-          className="mb-3 h-10 w-10 text-gray-400"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={1.5}
-          aria-hidden="true"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
-          />
-        </svg>
-        <p className="font-medium">Drop a folder here</p>
-        <p className="mt-1 mb-4 text-xs text-gray-500">
-          Folders are scanned recursively · max 25 MB each · up to 500 files
-        </p>
-
-        <div className="flex gap-2">
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800"
-          >
-            Browse files
-          </button>
-          <button
-            onClick={() => folderInputRef.current?.click()}
-            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-          >
-            Select folder
-          </button>
-        </div>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/pdf,.pdf"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files?.length) handleFiles(fromFileList(e.target.files));
-            e.target.value = "";
-          }}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <DropZone
+          title="Southwest"
+          subtitle="Fills Air Waybill + IAC"
+          onFiles={(picked) => handleFiles(picked, "southwest")}
         />
-        <input
-          ref={folderInputRef}
-          type="file"
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files?.length) handleFiles(fromFileList(e.target.files));
-            e.target.value = "";
-          }}
+        <DropZone
+          title="Delta"
+          subtitle="Fills DHL IAC only"
+          onFiles={(picked) => handleFiles(picked, "delta")}
         />
       </div>
 
@@ -335,7 +254,9 @@ export default function Home() {
               {okCount} parsed
               {failCount > 0 ? ` · ${failCount} failed` : ""}
               {awbResults.length > 0
-                ? ` · ${awbResults.length} fillable`
+                ? ` · ${awbResults.length} fillable · ${
+                    carrier === "delta" ? "Delta" : "Southwest"
+                  }`
                 : ""}
             </p>
             <div className="flex items-center gap-2">
@@ -360,7 +281,7 @@ export default function Home() {
 
           <div className="space-y-3">
             {results.map((r, i) => (
-              <FileCard key={`${r.fileName}-${i}`} result={r} />
+              <FileCard key={`${r.fileName}-${i}`} result={r} carrier={carrier} />
             ))}
           </div>
         </section>
@@ -369,7 +290,118 @@ export default function Home() {
   );
 }
 
-function FileCard({ result }: { result: FileResult }) {
+// A drag-and-drop / browse zone for one carrier workflow. The zone a file is
+// dropped into decides how its filled documents are produced.
+function DropZone({
+  title,
+  subtitle,
+  onFiles,
+}: {
+  title: string;
+  subtitle: string;
+  onFiles: (picked: PickedFile[]) => void;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+
+  // webkitdirectory isn't in React's input typings, so set it on mount.
+  useEffect(() => {
+    const el = folderInputRef.current;
+    if (el) {
+      el.setAttribute("webkitdirectory", "");
+      el.setAttribute("directory", "");
+    }
+  }, []);
+
+  const onDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragging(false);
+      // Collect entries synchronously — the DataTransfer list is cleared once
+      // the handler yields to an await.
+      const entries: FileSystemEntry[] = [];
+      const items = e.dataTransfer.items;
+      if (items?.length) {
+        for (const item of Array.from(items)) {
+          const entry = item.webkitGetAsEntry?.();
+          if (entry) entries.push(entry);
+        }
+      }
+      const picked: PickedFile[] = [];
+      if (entries.length) {
+        for (const entry of entries) await walkEntry(entry, picked);
+      } else if (e.dataTransfer.files?.length) {
+        for (const file of Array.from(e.dataTransfer.files)) {
+          picked.push({ file, path: file.name });
+        }
+      }
+      onFiles(picked);
+    },
+    [onFiles],
+  );
+
+  return (
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={onDrop}
+      className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center transition ${
+        dragging
+          ? "border-blue-500 bg-blue-50 dark:bg-blue-950/30"
+          : "border-gray-300 dark:border-gray-700"
+      }`}
+    >
+      <p className="font-semibold">{title}</p>
+      <p className="mt-1 mb-4 text-xs text-gray-500">{subtitle}</p>
+      <div className="flex gap-2">
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800"
+        >
+          Browse files
+        </button>
+        <button
+          onClick={() => folderInputRef.current?.click()}
+          className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+        >
+          Select folder
+        </button>
+      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/pdf,.pdf"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files?.length) onFiles(fromFileList(e.target.files));
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files?.length) onFiles(fromFileList(e.target.files));
+          e.target.value = "";
+        }}
+      />
+    </div>
+  );
+}
+
+function FileCard({
+  result,
+  carrier,
+}: {
+  result: FileResult;
+  carrier: Carrier;
+}) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [filling, setFilling] = useState(false);
@@ -377,24 +409,27 @@ function FileCard({ result }: { result: FileResult }) {
 
   // Documents we know how to map onto the Air Waybill form.
   const fillable = canFillAwb(result);
-  // Ticket → Air Waybill + IAC; IAC certification → Air Waybill only.
-  const fillLabel =
-    result.ok && result.mapping?.type === "dhl-sameday-ticket"
-      ? "Download filled Air Waybill + IAC"
-      : "Download filled Air Waybill";
+  // The carrier (chosen by drop zone) decides the output: Southwest = Air
+  // Waybill + IAC, Delta = IAC only. A standalone IAC just fills the Air Waybill.
+  const isTicket = result.ok && result.mapping?.type === "dhl-sameday-ticket";
+  const fillLabel = !isTicket
+    ? "Download filled Air Waybill"
+    : carrier === "delta"
+      ? "Download filled IAC"
+      : "Download filled Air Waybill + IAC";
 
   const downloadAwb = useCallback(async () => {
     if (!canFillAwb(result)) return;
     setFilling(true);
     setFillError(null);
     try {
-      await downloadFilledDocs(result);
+      await downloadFilledDocs(result, carrier);
     } catch (err) {
       setFillError(err instanceof Error ? err.message : "Unexpected error.");
     } finally {
       setFilling(false);
     }
-  }, [result]);
+  }, [result, carrier]);
 
   const copyText = useCallback(() => {
     if (!result.ok) return;
