@@ -57,14 +57,18 @@ function downloadName(path: string) {
   return leaf.replace(/\.pdf$/i, "") + ".txt";
 }
 
-// Download name for the Air Waybill filled from a given source document.
-function awbFileName(path: string) {
+// Download name for the filled document(s) generated from a source PDF. A
+// ticket yields a merged Air Waybill + IAC packet; an IAC yields the Air Waybill.
+function filledFileName(path: string, mapping: DocumentMapping) {
   const leaf = path.split("/").pop() ?? path;
-  return leaf.replace(/\.pdf$/i, "") + "_AirWaybill.pdf";
+  const suffix =
+    mapping.type === "dhl-sameday-ticket" ? "_AirWaybill_IAC" : "_AirWaybill";
+  return leaf.replace(/\.pdf$/i, "") + suffix + ".pdf";
 }
 
-// Request a filled Air Waybill PDF for a detected DHL IAC mapping.
-async function fetchFilledAwb(mapping: DocumentMapping): Promise<Blob> {
+// Request the filled PDF for a mapping. The server returns a single PDF — for a
+// ticket it's the Air Waybill and IAC certification merged into one packet.
+async function fetchFilled(mapping: DocumentMapping): Promise<Blob> {
   const res = await fetch("/api/fill-awb", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -72,9 +76,15 @@ async function fetchFilledAwb(mapping: DocumentMapping): Promise<Blob> {
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error ?? "Failed to fill the Air Waybill.");
+    throw new Error(data.error ?? "Failed to generate the document.");
   }
   return res.blob();
+}
+
+// Generate and download the filled PDF for one parsed result.
+async function downloadFilledDocs(result: FillableResult) {
+  const blob = await fetchFilled(result.mapping);
+  downloadBlob(blob, filledFileName(result.fileName, result.mapping));
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -202,7 +212,7 @@ export default function Home() {
   const [downloadingAwbs, setDownloadingAwbs] = useState(false);
   const [awbError, setAwbError] = useState<string | null>(null);
 
-  // Every parsed fillable document can produce a filled Air Waybill.
+  // Every parsed fillable document can produce one or more filled forms.
   const awbResults = results.filter(canFillAwb);
 
   const downloadAllAwbs = useCallback(async () => {
@@ -210,16 +220,15 @@ export default function Home() {
     setAwbError(null);
     let failures = 0;
     for (const r of results) {
-      if (!r.ok || !canFillAwb(r)) continue;
+      if (!canFillAwb(r)) continue;
       try {
-        const blob = await fetchFilledAwb(r.mapping);
-        downloadBlob(blob, awbFileName(r.fileName));
+        await downloadFilledDocs(r);
       } catch {
         failures++;
       }
     }
     if (failures > 0) {
-      setAwbError(`${failures} Air Waybill${failures > 1 ? "s" : ""} failed to generate.`);
+      setAwbError(`${failures} document${failures > 1 ? "s" : ""} failed to generate.`);
     }
     setDownloadingAwbs(false);
   }, [results]);
@@ -326,7 +335,7 @@ export default function Home() {
               {okCount} parsed
               {failCount > 0 ? ` · ${failCount} failed` : ""}
               {awbResults.length > 0
-                ? ` · ${awbResults.length} Air Waybill${awbResults.length > 1 ? "s" : ""}`
+                ? ` · ${awbResults.length} fillable`
                 : ""}
             </p>
             <div className="flex items-center gap-2">
@@ -343,7 +352,7 @@ export default function Home() {
                 >
                   {downloadingAwbs
                     ? "Generating…"
-                    : `Download all Air Waybills (${awbResults.length})`}
+                    : `Download all filled forms (${awbResults.length})`}
                 </button>
               )}
             </div>
@@ -368,14 +377,18 @@ function FileCard({ result }: { result: FileResult }) {
 
   // Documents we know how to map onto the Air Waybill form.
   const fillable = canFillAwb(result);
+  // Ticket → Air Waybill + IAC; IAC certification → Air Waybill only.
+  const fillLabel =
+    result.ok && result.mapping?.type === "dhl-sameday-ticket"
+      ? "Download filled Air Waybill + IAC"
+      : "Download filled Air Waybill";
 
-  const downloadFilledAwb = useCallback(async () => {
-    if (!result.ok || !result.mapping) return;
+  const downloadAwb = useCallback(async () => {
+    if (!canFillAwb(result)) return;
     setFilling(true);
     setFillError(null);
     try {
-      const blob = await fetchFilledAwb(result.mapping);
-      downloadBlob(blob, awbFileName(result.fileName));
+      await downloadFilledDocs(result);
     } catch (err) {
       setFillError(err instanceof Error ? err.message : "Unexpected error.");
     } finally {
@@ -420,9 +433,10 @@ function FileCard({ result }: { result: FileResult }) {
 
   return (
     <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
+      <div className="flex items-center gap-2 pr-3">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50 dark:hover:bg-gray-900"
+        className="flex min-w-0 flex-1 items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50 dark:hover:bg-gray-900"
       >
         <span className="flex min-w-0 flex-1 items-center gap-2">
           <span className="truncate font-medium">{result.fileName}</span>
@@ -452,6 +466,21 @@ function FileCard({ result }: { result: FileResult }) {
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
+        {fillable && (
+          <button
+            onClick={downloadAwb}
+            disabled={filling}
+            className="shrink-0 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+          >
+            {filling ? "Generating…" : fillLabel}
+          </button>
+        )}
+      </div>
+      {fillError && (
+        <p className="border-t border-gray-200 px-4 py-2 text-sm text-red-600 dark:border-gray-800 dark:text-red-400">
+          {fillError}
+        </p>
+      )}
 
       {open && (
         <div className="border-t border-gray-200 p-4 dark:border-gray-800">
@@ -484,22 +513,6 @@ function FileCard({ result }: { result: FileResult }) {
                   </div>
                 ))}
               </dl>
-              {fillable && (
-                <div className="mt-3 flex items-center gap-3">
-                  <button
-                    onClick={downloadFilledAwb}
-                    disabled={filling}
-                    className="rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-60"
-                  >
-                    {filling ? "Generating…" : "Download filled Air Waybill"}
-                  </button>
-                  {fillError && (
-                    <span className="text-sm text-red-600 dark:text-red-400">
-                      {fillError}
-                    </span>
-                  )}
-                </div>
-              )}
             </div>
           )}
           <div className="mb-3 flex justify-end gap-2">
