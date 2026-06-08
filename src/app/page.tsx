@@ -30,6 +30,20 @@ type FileResult =
 
 type PickedFile = { file: File; path: string };
 
+// Document types that can be mapped onto the Air Waybill form. Keep in sync
+// with mappingToAwbValues in lib/awb-fill.
+const AWB_FILLABLE_TYPES = new Set(["dhl-iac", "dhl-sameday-ticket"]);
+
+type FillableResult = Extract<FileResult, { ok: true }> & {
+  mapping: DocumentMapping;
+};
+
+function canFillAwb(result: FileResult): result is FillableResult {
+  return Boolean(
+    result.ok && result.mapping && AWB_FILLABLE_TYPES.has(result.mapping.type),
+  );
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -188,17 +202,15 @@ export default function Home() {
   const [downloadingAwbs, setDownloadingAwbs] = useState(false);
   const [awbError, setAwbError] = useState<string | null>(null);
 
-  // Every parsed DHL IAC document can produce a filled Air Waybill.
-  const awbResults = results.filter(
-    (r) => r.ok && r.mapping?.type === "dhl-iac",
-  );
+  // Every parsed fillable document can produce a filled Air Waybill.
+  const awbResults = results.filter(canFillAwb);
 
   const downloadAllAwbs = useCallback(async () => {
     setDownloadingAwbs(true);
     setAwbError(null);
     let failures = 0;
     for (const r of results) {
-      if (!r.ok || r.mapping?.type !== "dhl-iac") continue;
+      if (!r.ok || !canFillAwb(r)) continue;
       try {
         const blob = await fetchFilledAwb(r.mapping);
         downloadBlob(blob, awbFileName(r.fileName));
@@ -354,8 +366,8 @@ function FileCard({ result }: { result: FileResult }) {
   const [filling, setFilling] = useState(false);
   const [fillError, setFillError] = useState<string | null>(null);
 
-  // Only DHL IAC documents can be mapped onto the Air Waybill form.
-  const canFillAwb = result.ok && result.mapping?.type === "dhl-iac";
+  // Documents we know how to map onto the Air Waybill form.
+  const fillable = canFillAwb(result);
 
   const downloadFilledAwb = useCallback(async () => {
     if (!result.ok || !result.mapping) return;
@@ -472,7 +484,7 @@ function FileCard({ result }: { result: FileResult }) {
                   </div>
                 ))}
               </dl>
-              {canFillAwb && (
+              {fillable && (
                 <div className="mt-3 flex items-center gap-3">
                   <button
                     onClick={downloadFilledAwb}

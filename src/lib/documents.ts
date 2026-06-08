@@ -198,7 +198,107 @@ const AWB_GUIDE: DocumentDefinition = {
   },
 };
 
-const DEFINITIONS: DocumentDefinition[] = [DHL_IAC, AWB_GUIDE];
+// Convert a "YY/MM/DD" routing date (e.g. "26/06/08") to ISO "20YY-MM-DD".
+function isoFromYYMMDD(raw: string | null): string | null {
+  if (!raw) return null;
+  const m = raw.match(/(\d{2})\/(\d{2})\/(\d{2})/);
+  return m ? `20${m[1]}-${m[2]}-${m[3]}` : raw;
+}
+
+// Build a multi-line "Name / street / city / Attn" address from the lines that
+// follow an "Address" label on the dispatch ticket, appending the phone. Unlike
+// cleanValue this preserves line breaks (AWB address boxes are multi-line) and
+// strips a trailing e-mail that OCR/extraction leaves on the Attn line.
+function composeAddress(block: string | undefined, phone?: string): string | null {
+  if (!block) return null;
+  const lines = block
+    .split("\n")
+    .map((l) => l.replace(/\s+[\w.+-]+@[\w.-]+\b.*$/, "").trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  return phone ? `${lines.join("\n")}\nTel: ${phone}` : lines.join("\n");
+}
+
+// A DHL SameDay / Sky Courier dispatch & routing ticket. Unlike the IAC
+// certification this carries the full shipment (shipper, consignee, routing,
+// AWB number), so it maps directly onto the Air Waybill form.
+const DHL_SAMEDAY_TICKET: DocumentDefinition = {
+  type: "dhl-sameday-ticket",
+  label: "DHL SameDay Dispatch Ticket",
+  match: ({ text }) => {
+    const flat = flatten(text).toLowerCase();
+    let score = 0;
+    if (/dhl\s*sameday\/sky courier/.test(flat)) score += 0.5;
+    if (/ticket#\s*\d+/.test(flat)) score += 0.2;
+    if (/air waybill#:\s*\d+/.test(flat)) score += 0.2;
+    if (/routing info/.test(flat)) score += 0.1;
+    return Math.min(score, 1);
+  },
+  extract: ({ text }) => {
+    // Pickup/delivery address blocks: the lines after each "Address" label up to
+    // the next blank line, with their phones (in document order).
+    const blocks = [...text.matchAll(/Address\s+([\s\S]*?)(?=\n[ \t]*\n)/g)].map(
+      (m) => m[1],
+    );
+    const phones = [
+      ...text.matchAll(/Phone\s*(\(\d{3}\)\s*\d{3}-?\d{4})/g),
+    ].map((m) => m[1]);
+
+    // Routing leg: "ORIG CARRIER FLT DATE ETD ETA DEST" on a single line.
+    const route = text.match(
+      /^([A-Z]{3})\s+([A-Z]{2})\s+(\w+)\s+(\d{2}\/\d{2}\/\d{2})\s+\d{1,2}:\d{2}\s+\d{1,2}:\d{2}\s+([A-Z]{3})/m,
+    );
+
+    // Totals row: "Total <pcs> <wgt> <len> <wid> <hgt>".
+    const totals = text.match(
+      /Total\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/,
+    );
+
+    // Issuing agent city/state from the header banner.
+    const agentCity = capture(
+      text,
+      /Sky Courier\s*-\s*[^-]*-\s*([A-Za-z .]+,\s*[A-Z]{2})/i,
+    );
+
+    return [
+      { label: "Air Waybill Number", value: capture(text, /AIR WAYBILL#:\s*(\d+)/i) },
+      { label: "Ticket Number", value: capture(text, /Ticket#\s*(\d+)/i) },
+      { label: "Customer", value: valueAfter(text, "Cust Name") },
+      { label: "Reference Number", value: capture(text, /Reference#\s*(\d+)/i) },
+      { label: "Description", value: valueAfter(text, "Description") },
+      { label: "Pieces", value: totals ? totals[1] : null },
+      { label: "Gross Weight (lb)", value: totals ? totals[2] : null },
+      {
+        label: "Dimensions (in)",
+        value: totals ? `${totals[3]} x ${totals[4]} x ${totals[5]}` : null,
+      },
+      {
+        label: "Shipper Name and Address",
+        value: composeAddress(blocks[0], phones[0]),
+      },
+      {
+        label: "Consignee Name and Address",
+        value: composeAddress(blocks[1], phones[1]),
+      },
+      { label: "Origin Airport", value: route ? route[1] : null },
+      { label: "Destination Airport", value: route ? route[5] : null },
+      { label: "Carrier", value: route ? route[2] : null },
+      { label: "Flight Number", value: route ? route[3] : null },
+      { label: "Flight Date", value: route ? isoFromYYMMDD(route[4]) : null },
+      {
+        label: "Issuing Agent",
+        value: agentCity ? `DHL SameDay / Sky Courier, ${agentCity}` : null,
+      },
+      { label: "Part Number", value: capture(text, /\b(\d{4}-\d{4}-\d{4})\b/) },
+    ];
+  },
+};
+
+const DEFINITIONS: DocumentDefinition[] = [
+  DHL_IAC,
+  AWB_GUIDE,
+  DHL_SAMEDAY_TICKET,
+];
 
 const MIN_CONFIDENCE = 0.5;
 

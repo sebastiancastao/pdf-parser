@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DocumentMapping } from "@/lib/documents";
-import { iacToAwbValues, fillAwbForm } from "@/lib/awb-fill";
+import { mappingToAwbValues, fillAwbForm } from "@/lib/awb-fill";
 
 // pdf-lib needs the Node.js runtime.
 export const runtime = "nodejs";
@@ -19,16 +19,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  if (!mapping || mapping.type !== "dhl-iac") {
+  const values = mapping ? mappingToAwbValues(mapping) : null;
+  if (!values) {
     return NextResponse.json(
-      { error: "Filling is only supported for DHL IAC documents." },
+      {
+        error:
+          "Filling is only supported for DHL IAC and DHL SameDay ticket documents.",
+      },
       { status: 400 },
     );
   }
 
   try {
     const template = new Uint8Array(await readFile(TEMPLATE_PATH));
-    const values = iacToAwbValues(mapping);
     const { bytes } = await fillAwbForm(template, values);
 
     // Hand back a plain ArrayBuffer slice — a valid BodyInit regardless of the

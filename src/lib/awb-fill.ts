@@ -53,6 +53,89 @@ export function iacToAwbValues(
 }
 
 /**
+ * Translate a DHL SameDay dispatch-ticket mapping into AWB AcroForm field
+ * values. The ticket carries the full shipment, so it populates the shipper,
+ * consignee, routing, cargo and handling boxes directly. Keys are the exact
+ * AcroForm field names on the AWB form (page 3); blank ticket fields are omitted.
+ */
+export function ticketToAwbValues(
+  mapping: DocumentMapping,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const set = (name: string, value: string | null | undefined) => {
+    if (value) out[name] = value;
+  };
+
+  set("Air Waybill Number", field(mapping, "Air Waybill Number"));
+  set("Shipper Name and Address", field(mapping, "Shipper Name and Address"));
+  set("Consignee Name and Address", field(mapping, "Consignee Name and Address"));
+  set("Issuing Carriers Agent Name and City", field(mapping, "Issuing Agent"));
+
+  const carrier = field(mapping, "Carrier");
+  set("Carrier1", carrier);
+  const origin = field(mapping, "Origin Airport");
+  const dest = field(mapping, "Destination Airport");
+  set("Airport of Departure", origin);
+  set("Airport of Destination", dest);
+  // First routing leg: To <destination>  By <first carrier>.
+  set("To", dest);
+  set("By First Carrier", carrier);
+  set("Flight Date", field(mapping, "Flight Date"));
+
+  set("Reference Number", field(mapping, "Reference Number"));
+  const ticket = field(mapping, "Ticket Number");
+  if (ticket) set("Accounting Information", `DHL Same Day Ticket# ${ticket}`);
+
+  const pieces = field(mapping, "Pieces");
+  const weight = field(mapping, "Gross Weight (lb)");
+  set("No of Pieces RCPRow1", pieces);
+  set("Gross W eightRow1", weight);
+  set("Chargeable W eightRow1", weight);
+  if (weight) set("kg lbRow1", "lb");
+
+  // Goods description, with part/qty/dimensions where present.
+  const description = field(mapping, "Description");
+  if (description) {
+    const part = field(mapping, "Part Number");
+    const dims = field(mapping, "Dimensions (in)");
+    const detail = [
+      part && `Part# ${part}`,
+      pieces && `Qty ${pieces}`,
+      dims && `${dims} in`,
+    ].filter(Boolean);
+    set(
+      "Nature and Quantity of Goods",
+      detail.length ? `${description}\n${detail.join(" · ")}` : description,
+    );
+  }
+
+  set(
+    "Handling Information",
+    `Tendered by DHL Same Day${carrier ? ` (PreBooked ${carrier})` : ""}. ` +
+      "STA APPROVED – DRIVERS ONLY. MUST CHECK ID AT PICK UP.",
+  );
+
+  return out;
+}
+
+/**
+ * Translate a recognised document mapping into AWB AcroForm field values, or
+ * null when the document type can't fill an Air Waybill.
+ */
+export function mappingToAwbValues(
+  mapping: DocumentMapping,
+): Record<string, string> | null {
+  switch (mapping.type) {
+    case "dhl-iac":
+      return iacToAwbValues(mapping);
+    case "dhl-sameday-ticket":
+      return ticketToAwbValues(mapping);
+    default:
+      return null;
+  }
+}
+
+/**
  * Fill the AWB AcroForm with the given field values and return the saved PDF
  * bytes. Unknown or non-text fields are skipped rather than throwing, so a
  * slightly different AWB template won't break the fill.
