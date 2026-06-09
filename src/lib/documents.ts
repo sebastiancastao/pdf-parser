@@ -104,6 +104,28 @@ function checkbox(text: string, label: string): string | null {
     : v;
 }
 
+const AIRLINE_NAMES: Record<string, string> = {
+  AA: "American Airlines",
+  AS: "Alaska Airlines",
+  B6: "JetBlue Airways",
+  DL: "Delta Air Lines",
+  F9: "Frontier Airlines",
+  NK: "Spirit Airlines",
+  UA: "United Airlines",
+  WN: "Southwest Airlines",
+};
+
+function airlineName(code: string | null): string | null {
+  if (!code) return null;
+  return AIRLINE_NAMES[code.toUpperCase()] ?? code;
+}
+
+function normalizeVendorName(value: string | null): string | null {
+  if (!value) return null;
+  if (/skyline courier/i.test(value)) return "Skyline Courier & Logistics";
+  return value;
+}
+
 // --- Known documents --------------------------------------------------------
 
 const DHL_IAC: DocumentDefinition = {
@@ -283,6 +305,10 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
       { label: "Origin Airport", value: route ? route[1] : null },
       { label: "Destination Airport", value: route ? route[5] : null },
       { label: "Carrier", value: route ? route[2] : null },
+      {
+        label: "Airline Tendered",
+        value: airlineName(route ? route[2] : null),
+      },
       { label: "Flight Number", value: route ? route[3] : null },
       { label: "Flight Date", value: route ? isoFromYYMMDD(route[4]) : null },
       {
@@ -294,7 +320,9 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
         // The subcontracted courier ("Vendor: 57126 SKYLINE COURIER LOGT") —
         // the driver's employer for the IAC certification.
         label: "Vendor",
-        value: cleanValue(text.match(/Vendor:\s*\d*\s*([^\n]+)/i)?.[1] ?? null),
+        value: normalizeVendorName(
+          cleanValue(text.match(/Vendor:\s*\d*\s*([^\n]+)/i)?.[1] ?? null),
+        ),
       },
     ];
   },

@@ -136,9 +136,11 @@ export function mappingToAwbValues(
 }
 
 /**
- * Fill the AWB AcroForm with the given field values and return the saved PDF
- * bytes. Unknown or non-text fields are skipped rather than throwing, so a
- * slightly different AWB template won't break the fill.
+ * Fill the AWB AcroForm with the given field values and return only the filled
+ * Air Waybill page. The source template carries introductory pages ahead of the
+ * actual form, and Southwest output should omit those. Unknown or non-text
+ * fields are skipped rather than throwing, so a slightly different AWB
+ * template won't break the fill.
  */
 export async function fillAwbForm(
   pdfBytes: Uint8Array,
@@ -164,6 +166,15 @@ export async function fillAwbForm(
   // appearances, without locking the form.
   form.updateFieldAppearances();
 
-  const bytes = await doc.save();
+  // The actual AWB AcroForm is page 3 of the template; flatten the form and
+  // return just that page so generated Southwest packets don't include the two
+  // preceding instruction/content pages.
+  form.flatten();
+  const out = await PDFDocument.create();
+  const awbPageIndex = Math.min(2, doc.getPageCount() - 1);
+  const [page] = await out.copyPages(doc, [awbPageIndex]);
+  out.addPage(page);
+
+  const bytes = await out.save();
   return { bytes, filled, skipped };
 }

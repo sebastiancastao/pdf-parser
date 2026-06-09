@@ -15,6 +15,8 @@
 
 import type { DocumentMapping } from "./documents";
 
+export type IacWorkflowCarrier = "southwest" | "delta";
+
 // Scale the OCR image was measured at (renderPageAsImage scale), and the page
 // height in points. Used to map image pixels -> PDF points (origin bottom-left).
 const OCR_SCALE = 3;
@@ -23,28 +25,62 @@ const PAGE_HEIGHT_PT = 792;
 const BASELINE_OFFSET_PX = 30;
 // Gap (pt) between the label's colon and the value we write after it.
 const VALUE_GAP_PT = 8;
+// The ID Verification Check rows are a table: values belong in the right-hand
+// answer box rather than immediately after each printed label.
+const ID_VERIFICATION_VALUE_X_PX = 1248;
 
-// Text fields, keyed by printed label: the OCR-measured pixel position of the
-// end of the label (the colon) and the line's top edge.
-const FIELD_POSITIONS: Record<string, { colonXpx: number; topPx: number }> = {
+type TextFieldPosition = {
+  topPx: number;
+  xpx: number;
+  placement: "after-label" | "right-box";
+};
+
+// Text fields, keyed by printed label. Most values are written after the
+// label's colon; the ID verification table instead uses a fixed box anchor.
+const FIELD_POSITIONS: Record<string, TextFieldPosition> = {
   // ID Verification Check section.
-  "Type of ID reviewed": { colonXpx: 906, topPx: 1027 },
-  "Second type of ID reviewed": { colonXpx: 760, topPx: 1152 },
+  "Type of ID reviewed": {
+    xpx: ID_VERIFICATION_VALUE_X_PX,
+    placement: "right-box",
+    topPx: 1027,
+  },
+  "Second type of ID reviewed": {
+    xpx: ID_VERIFICATION_VALUE_X_PX,
+    placement: "right-box",
+    topPx: 1152,
+  },
   "Printed name of individual cargo accepted from": {
-    colonXpx: 1050,
+    xpx: ID_VERIFICATION_VALUE_X_PX,
+    placement: "right-box",
     topPx: 1242,
   },
-  "Shipper's Company Name": { colonXpx: 723, topPx: 1288 },
-  "Name of IAC employee who verified ID": { colonXpx: 1192, topPx: 1355 },
+  "Shipper's Company Name": {
+    xpx: ID_VERIFICATION_VALUE_X_PX,
+    placement: "right-box",
+    topPx: 1288,
+  },
+  "Name of IAC employee who verified ID": {
+    xpx: ID_VERIFICATION_VALUE_X_PX,
+    placement: "right-box",
+    topPx: 1355,
+  },
   // DHL Same Day driver / representative section.
-  "Authorized Representative / Driver's Name": { colonXpx: 795, topPx: 1479 },
-  "Employer / Company Name": { colonXpx: 477, topPx: 1540 },
+  "Authorized Representative / Driver's Name": {
+    xpx: 795,
+    placement: "after-label",
+    topPx: 1479,
+  },
+  "Employer / Company Name": {
+    xpx: 477,
+    placement: "after-label",
+    topPx: 1540,
+  },
   // Tendering Information section.
-  "Master Air Waybill": { colonXpx: 386, topPx: 1734 },
-  "DHL Same Day Job #": { colonXpx: 418, topPx: 1790 },
-  "Airline Tendered": { colonXpx: 351, topPx: 1844 },
-  "Flight Number": { colonXpx: 320, topPx: 1898 },
-  "Date Tendered": { colonXpx: 320, topPx: 1954 },
+  "Master Air Waybill": { xpx: 386, placement: "after-label", topPx: 1734 },
+  "DHL Same Day Job #": { xpx: 418, placement: "after-label", topPx: 1790 },
+  "Airline Tendered": { xpx: 351, placement: "after-label", topPx: 1844 },
+  "Flight Number": { xpx: 320, placement: "after-label", topPx: 1898 },
+  "Date Tendered": { xpx: 320, placement: "after-label", topPx: 1954 },
 };
 
 // Yes/No questions, keyed by label. Each option is the right edge of its printed
@@ -69,6 +105,16 @@ const YES_NO_MARKS: Record<string, { Yes: Point; No: Point }> = {
   },
 };
 
+// Example IACs for this workflow use the same full authorized-representative
+// name in both signature-identification roles.
+const AUTHORIZED_REPRESENTATIVE_NAME = "Donald Hill";
+const ID_VERIFIER_NAME = AUTHORIZED_REPRESENTATIVE_NAME;
+const CARGO_ACCEPTED_FROM_NAME = "Kamel Falak";
+const IAC_AIRLINE_NAMES: Record<IacWorkflowCarrier, string> = {
+  southwest: "Southwest Airlines",
+  delta: "Delta Air Lines",
+};
+
 const px = (v: number) => v / OCR_SCALE;
 
 /**
@@ -78,6 +124,7 @@ const px = (v: number) => v / OCR_SCALE;
  */
 export function ticketToIacValues(
   mapping: DocumentMapping,
+  carrier: IacWorkflowCarrier = "southwest",
 ): Record<string, string> | null {
   if (mapping.type !== "dhl-sameday-ticket") return null;
 
@@ -90,13 +137,18 @@ export function ticketToIacValues(
   };
 
   // Text fields we can derive from the ticket.
+  set("Printed name of individual cargo accepted from", CARGO_ACCEPTED_FROM_NAME);
   set("Shipper's Company Name", field("Customer"));
   set("Employer / Company Name", field("Vendor"));
   set("Master Air Waybill", field("Air Waybill Number"));
   set("DHL Same Day Job #", field("Ticket Number"));
-  set("Airline Tendered", field("Carrier"));
+  set("Airline Tendered", IAC_AIRLINE_NAMES[carrier]);
   set("Flight Number", field("Flight Number"));
   set("Date Tendered", field("Flight Date"));
+
+  // Known DHL Same Day personnel.
+  set("Authorized Representative / Driver's Name", AUTHORIZED_REPRESENTATIVE_NAME);
+  set("Name of IAC employee who verified ID", ID_VERIFIER_NAME);
 
   // Remaining text fields are completed by the driver at pickup; leave none blank.
   for (const label of Object.keys(FIELD_POSITIONS)) {
@@ -161,7 +213,7 @@ export async function fillIacForm(
       continue;
     }
     page.drawText(value, {
-      x: px(pos.colonXpx) + VALUE_GAP_PT,
+      x: px(pos.xpx) + (pos.placement === "after-label" ? VALUE_GAP_PT : 0),
       y: PAGE_HEIGHT_PT - px(pos.topPx + BASELINE_OFFSET_PX),
       size: 11,
       font,

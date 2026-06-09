@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const iacValues = mapping ? ticketToIacValues(mapping) : null;
+  const iacValues = mapping ? ticketToIacValues(mapping, carrier) : null;
 
   try {
     // Delta: fill the IAC certification only (no Air Waybill).
