@@ -266,13 +266,14 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
       ...text.matchAll(/Phone\s*(\(\d{3}\)\s*\d{3}-?\d{4})/g),
     ].map((m) => m[1]);
 
-    // Routing legs: each "ORIG CARRIER FLT DATE ETD ETA DEST" line. A connecting
-    // itinerary lists more than one (e.g. ATL→MDW then MDW→SFO), so capture them
-    // all: the first leg's origin is the departure, the last leg's destination is
-    // the final airport, and the first flight is the one tendered at origin.
+    // Routing legs: each "ORIG CARRIER FLT DATE ETD ETA DEST [L] [AWB#]" line. A
+    // connecting itinerary lists more than one (e.g. ATL→MDW then MDW→SFO), so
+    // capture them all: the first leg's origin is the departure and the last
+    // leg's destination is the final airport. Each leg may also carry its own air
+    // waybill number in the routing table's "AWB#" column (after the "L" flag).
     const legs = [
       ...text.matchAll(
-        /^([A-Z]{3})\s+([A-Z]{2})\s+(\w+)\s+(\d{2}\/\d{2}\/\d{2})\s+\d{1,2}:\d{2}\s+\d{1,2}:\d{2}\s+([A-Z]{3})/gm,
+        /^([A-Z]{3})\s+([A-Z]{2})\s+(\w+)\s+(\d{2}\/\d{2}\/\d{2})\s+\d{1,2}:\d{2}\s+\d{1,2}:\d{2}\s+([A-Z]{3})(?:\s+[A-Z]\b)?(?:\s+(\d{6,}))?/gm,
       ),
     ].map((m) => ({
       dep: m[1],
@@ -280,9 +281,23 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
       flight: m[3],
       date: m[4],
       des: m[5],
+      awb: m[6] ?? null,
     }));
     const firstLeg = legs[0] ?? null;
     const lastLeg = legs[legs.length - 1] ?? null;
+
+    // A connecting itinerary tenders each leg on its own flight, so the IAC's
+    // Flight Number / Date Tendered list every leg's value separated by " / ".
+    const joinLegs = (fn: (l: (typeof legs)[number]) => string | null) =>
+      legs.length ? legs.map(fn).join(" / ") : null;
+
+    // Air waybill(s): connecting legs each print their own AWB# in the routing
+    // table; a direct flight instead prints a single master AWB at the foot.
+    const legAwbs = legs.map((l) => l.awb).filter((v): v is string => Boolean(v));
+    const footerAwbs = [...text.matchAll(/AIR WAYBILL#:\s*(\d+)/gi)].map(
+      (m) => m[1],
+    );
+    const airWaybills = legAwbs.length ? legAwbs : footerAwbs;
 
     // Totals row: "Total <pcs> <wgt> <len> <wid> <hgt>".
     const totals = text.match(
@@ -296,7 +311,10 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
     );
 
     return [
-      { label: "Air Waybill Number", value: capture(text, /AIR WAYBILL#:\s*(\d+)/i) },
+      {
+        label: "Air Waybill Number",
+        value: airWaybills.length ? airWaybills.join(" / ") : null,
+      },
       { label: "Ticket Number", value: capture(text, /Ticket#\s*(\d+)/i) },
       { label: "Customer", value: valueAfter(text, "Cust Name") },
       { label: "Reference Number", value: capture(text, /Reference#\s*(\d+)/i) },
@@ -319,8 +337,8 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
       { label: "Destination Airport", value: lastLeg?.des ?? null },
       { label: "Carrier", value: firstLeg?.carrier ?? null },
       { label: "Airline Tendered", value: airlineName(firstLeg?.carrier ?? null) },
-      { label: "Flight Number", value: firstLeg?.flight ?? null },
-      { label: "Flight Date", value: firstLeg ? isoFromYYMMDD(firstLeg.date) : null },
+      { label: "Flight Number", value: joinLegs((l) => l.flight) },
+      { label: "Flight Date", value: joinLegs((l) => isoFromYYMMDD(l.date)) },
       {
         // Full requested routing, leg by leg, for the AWB's multi-leg boxes:
         // "DEP-DES CARRIER FLIGHT" per leg. A direct flight has a single leg.

@@ -7,6 +7,10 @@ import type { DocumentMapping } from "./documents";
 
 const SOUTHWEST_ACCOUNT_NO = "30021-015";
 
+// Reserved key carried in the values map (not an AcroForm field): text drawn as
+// a positioned overlay just below the shipper's account-number box.
+const SHIPPER_REF_OVERLAY_KEY = "__shipperRefOverlay";
+
 // The Air Waybill is tendered by the Indirect Air Carrier, so the shipper of
 // record is Sky Courier (DHL Same Day) — not the pickup customer — and the
 // shipper's account-number blank carries the IAC account number together with
@@ -79,6 +83,11 @@ export function ticketToAwbValues(
   set("Air Waybill Number", field(mapping, "Air Waybill Number"));
   // Shipper of record is the IAC (Sky Courier), not the pickup customer.
   set("Shipper Name and Address", SKY_COURIER_SHIPPER);
+  // The DHL job reference ("1//<ticket#>") is printed just below the shipper's
+  // account-number box. There's no AcroForm field there, so it's drawn as a
+  // positioned overlay (see SHIPPER_REF_OVERLAY_KEY in fillAwbForm).
+  const ticket = field(mapping, "Ticket Number");
+  if (ticket) out[SHIPPER_REF_OVERLAY_KEY] = `1//${ticket}`;
   // The shipper's account-number blank carries the IAC account number only.
   set("Shippers Account Number", SKY_COURIER_ACCOUNT_NO);
   set("Consignee Name and Address", field(mapping, "Consignee Name and Address"));
@@ -114,35 +123,44 @@ export function ticketToAwbValues(
 
   set("Flight Date", field(mapping, "Flight Date"));
 
-  set("Reference Number", field(mapping, "Reference Number"));
-  const ticket = field(mapping, "Ticket Number");
-  if (ticket) set("Accounting Information", `DHL Same Day Ticket# ${ticket}`);
+  // No value declared for carriage.
+  set("Declared Value for Carriage", "NVD");
+
+  // Accounting box: the date/time the AWB is billed (now, in US Eastern — the
+  // zone abbreviation resolves to EDT/EST automatically) plus the SWA account.
+  const billedParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "short",
+  }).formatToParts(new Date());
+  const p = Object.fromEntries(billedParts.map((x) => [x.type, x.value]));
+  set(
+    "Accounting Information",
+    `Billed on ${p.month}/${p.day}/${p.year} ${p.hour}:${p.minute} ${p.timeZoneName} SWA ACCOUNT 30021`,
+  );
 
   // Piece count, gross weight and chargeable weight are left blank on the
   // Southwest AWB (filled in by the carrier at acceptance).
   const pieces = field(mapping, "Pieces");
 
-  // Goods description, with part/qty/dimensions where present.
+  // Goods description, with part/qty where present.
   const description = field(mapping, "Description");
   if (description) {
     const part = field(mapping, "Part Number");
-    const dims = field(mapping, "Dimensions (in)");
     const detail = [
       part && `Part# ${part}`,
       pieces && `Qty ${pieces}`,
-      dims && `${dims} in`,
     ].filter(Boolean);
     set(
       "Nature and Quantity of Goods",
       detail.length ? `${description}\n${detail.join(" · ")}` : description,
     );
   }
-
-  set(
-    "Handling Information",
-    `Tendered by DHL Same Day${carrier ? ` (PreBooked ${carrier})` : ""}. ` +
-      "STA APPROVED – DRIVERS ONLY. MUST CHECK ID AT PICK UP.",
-  );
 
   return out;
 }
@@ -179,9 +197,13 @@ export async function fillAwbForm(
   const doc = await PDFDocument.load(pdfBytes);
   const form = doc.getForm();
 
+  // Pull out the reserved overlay value; everything else is an AcroForm field.
+  const shipperRef = values[SHIPPER_REF_OVERLAY_KEY];
+
   const filled: string[] = [];
   const skipped: string[] = [];
   for (const [name, value] of Object.entries(values)) {
+    if (name === SHIPPER_REF_OVERLAY_KEY) continue;
     try {
       const tf = form.getTextField(name);
       tf.setText(value);
@@ -212,6 +234,19 @@ export async function fillAwbForm(
   const xFont = await out.embedFont(StandardFonts.HelveticaBold);
   for (const x of [364.2, 392.9]) {
     page.drawText("X", { x, y: 501, size: 10, font: xFont, color: rgb(0, 0, 0) });
+  }
+
+  // DHL job reference, just below the shipper's account-number box (which sits
+  // at x=189, y=736..754); drawn here because the form has no field there.
+  if (shipperRef) {
+    const refFont = await out.embedFont(StandardFonts.Helvetica);
+    page.drawText(shipperRef, {
+      x: 191,
+      y: 724,
+      size: 9,
+      font: refFont,
+      color: rgb(0, 0, 0),
+    });
   }
 
   const bytes = await out.save();
