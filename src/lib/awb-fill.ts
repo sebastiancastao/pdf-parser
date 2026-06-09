@@ -7,6 +7,14 @@ import type { DocumentMapping } from "./documents";
 
 const SOUTHWEST_ACCOUNT_NO = "30021-015";
 
+// The Air Waybill is tendered by the Indirect Air Carrier, so the shipper of
+// record is Sky Courier (DHL Same Day) — not the pickup customer — and the
+// shipper's account-number blank carries the IAC account number together with
+// DHL's reference number for the job (both sit in that one box on the form).
+const SKY_COURIER_SHIPPER =
+  "SKY COURIER\n21240 RIDGE TOP CIRCLE\nSTERLING, VA 20166\nUS +1 (800) 336-3344";
+const SKY_COURIER_ACCOUNT_NO = "30021-15";
+
 // Look up a mapped field's value by label, returning null when absent/blank.
 function field(mapping: DocumentMapping, label: string): string | null {
   return mapping.fields.find((f) => f.label === label)?.value ?? null;
@@ -69,10 +77,12 @@ export function ticketToAwbValues(
   };
 
   set("Air Waybill Number", field(mapping, "Air Waybill Number"));
-  set("Shipper Name and Address", field(mapping, "Shipper Name and Address"));
+  // Shipper of record is the IAC (Sky Courier), not the pickup customer.
+  set("Shipper Name and Address", SKY_COURIER_SHIPPER);
+  // The shipper's account-number blank carries the IAC account number only.
+  set("Shippers Account Number", SKY_COURIER_ACCOUNT_NO);
   set("Consignee Name and Address", field(mapping, "Consignee Name and Address"));
   set("Issuing Carriers Agent Name and City", field(mapping, "Issuing Agent"));
-  set("Account No", SOUTHWEST_ACCOUNT_NO);
 
   const carrier = field(mapping, "Carrier");
   set("Carrier1", carrier);
@@ -80,21 +90,37 @@ export function ticketToAwbValues(
   const dest = field(mapping, "Destination Airport");
   set("Airport of Departure", origin);
   set("Airport of Destination", dest);
-  // First routing leg: To <destination>  By <first carrier>.
-  set("To", dest);
-  set("By First Carrier", carrier);
+
+  // Requested routing, leg by leg. A connecting itinerary (e.g. ATL→MDW→SFO)
+  // fills the second and third carrier boxes; a direct flight fills only the
+  // first. Parsed from the "Routing" field; falls back to a single
+  // origin→destination leg when that detail isn't available.
+  const routing = field(mapping, "Routing");
+  const legs = routing
+    ? [...routing.matchAll(/([A-Z]{3})-([A-Z]{3})\s+([A-Z]{2})\s+\S+/g)].map(
+        (m) => ({ des: m[2], by: m[3] }),
+      )
+    : [];
+  if (legs.length === 0 && dest && carrier) legs.push({ des: dest, by: carrier });
+  const legBoxes: Array<[string, string]> = [
+    ["To", "By First Carrier"],
+    ["to", "by"],
+    ["to_2", "by_2"],
+  ];
+  legs.slice(0, legBoxes.length).forEach((leg, i) => {
+    set(legBoxes[i][0], leg.des);
+    set(legBoxes[i][1], leg.by);
+  });
+
   set("Flight Date", field(mapping, "Flight Date"));
 
   set("Reference Number", field(mapping, "Reference Number"));
   const ticket = field(mapping, "Ticket Number");
   if (ticket) set("Accounting Information", `DHL Same Day Ticket# ${ticket}`);
 
+  // Piece count, gross weight and chargeable weight are left blank on the
+  // Southwest AWB (filled in by the carrier at acceptance).
   const pieces = field(mapping, "Pieces");
-  const weight = field(mapping, "Gross Weight (lb)");
-  set("No of Pieces RCPRow1", pieces);
-  set("Gross W eightRow1", weight);
-  set("Chargeable W eightRow1", weight);
-  if (weight) set("kg lbRow1", "lb");
 
   // Goods description, with part/qty/dimensions where present.
   const description = field(mapping, "Description");
@@ -149,7 +175,7 @@ export async function fillAwbForm(
   pdfBytes: Uint8Array,
   values: Record<string, string>,
 ): Promise<{ bytes: Uint8Array; filled: string[]; skipped: string[] }> {
-  const { PDFDocument } = await import("pdf-lib");
+  const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
   const doc = await PDFDocument.load(pdfBytes);
   const form = doc.getForm();
 
@@ -177,6 +203,16 @@ export async function fillAwbForm(
   const awbPageIndex = Math.min(2, doc.getPageCount() - 1);
   const [page] = await out.copyPages(doc, [awbPageIndex]);
   out.addPage(page);
+
+  // Mark the prepaid charge boxes with an "X", as on the properly-completed
+  // Southwest AWB: the WT/VAL and Other charges are both prepaid (CHGS Code
+  // "PP"), so each gets an X in its PPD column. The Other-PPD box has no
+  // AcroForm field, so both marks are drawn as an overlay at the box centres
+  // (page-3 coordinates, PDF points, bottom-left origin).
+  const xFont = await out.embedFont(StandardFonts.HelveticaBold);
+  for (const x of [364.2, 392.9]) {
+    page.drawText("X", { x, y: 501, size: 10, font: xFont, color: rgb(0, 0, 0) });
+  }
 
   const bytes = await out.save();
   return { bytes, filled, skipped };

@@ -5,7 +5,8 @@
       "Bash(node --experimental-strip-types scripts/iac-geom.ts)",
       "Bash(node --experimental-strip-types scripts/iac-proto.ts)",
       "Bash(node --experimental-strip-types scripts/verify-both.ts)",
-      "Bash(node --experimental-strip-types scripts/iac-fields.ts)"
+      "Bash(node --experimental-strip-types scripts/iac-fields.ts)",
+      "Bash(node -e ' *)"
     ]
   }
 }

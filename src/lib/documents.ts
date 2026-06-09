@@ -266,10 +266,23 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
       ...text.matchAll(/Phone\s*(\(\d{3}\)\s*\d{3}-?\d{4})/g),
     ].map((m) => m[1]);
 
-    // Routing leg: "ORIG CARRIER FLT DATE ETD ETA DEST" on a single line.
-    const route = text.match(
-      /^([A-Z]{3})\s+([A-Z]{2})\s+(\w+)\s+(\d{2}\/\d{2}\/\d{2})\s+\d{1,2}:\d{2}\s+\d{1,2}:\d{2}\s+([A-Z]{3})/m,
-    );
+    // Routing legs: each "ORIG CARRIER FLT DATE ETD ETA DEST" line. A connecting
+    // itinerary lists more than one (e.g. ATL→MDW then MDW→SFO), so capture them
+    // all: the first leg's origin is the departure, the last leg's destination is
+    // the final airport, and the first flight is the one tendered at origin.
+    const legs = [
+      ...text.matchAll(
+        /^([A-Z]{3})\s+([A-Z]{2})\s+(\w+)\s+(\d{2}\/\d{2}\/\d{2})\s+\d{1,2}:\d{2}\s+\d{1,2}:\d{2}\s+([A-Z]{3})/gm,
+      ),
+    ].map((m) => ({
+      dep: m[1],
+      carrier: m[2],
+      flight: m[3],
+      date: m[4],
+      des: m[5],
+    }));
+    const firstLeg = legs[0] ?? null;
+    const lastLeg = legs[legs.length - 1] ?? null;
 
     // Totals row: "Total <pcs> <wgt> <len> <wid> <hgt>".
     const totals = text.match(
@@ -302,15 +315,22 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
         label: "Consignee Name and Address",
         value: composeAddress(blocks[1], phones[1]),
       },
-      { label: "Origin Airport", value: route ? route[1] : null },
-      { label: "Destination Airport", value: route ? route[5] : null },
-      { label: "Carrier", value: route ? route[2] : null },
+      { label: "Origin Airport", value: firstLeg?.dep ?? null },
+      { label: "Destination Airport", value: lastLeg?.des ?? null },
+      { label: "Carrier", value: firstLeg?.carrier ?? null },
+      { label: "Airline Tendered", value: airlineName(firstLeg?.carrier ?? null) },
+      { label: "Flight Number", value: firstLeg?.flight ?? null },
+      { label: "Flight Date", value: firstLeg ? isoFromYYMMDD(firstLeg.date) : null },
       {
-        label: "Airline Tendered",
-        value: airlineName(route ? route[2] : null),
+        // Full requested routing, leg by leg, for the AWB's multi-leg boxes:
+        // "DEP-DES CARRIER FLIGHT" per leg. A direct flight has a single leg.
+        label: "Routing",
+        value: legs.length
+          ? legs
+              .map((l) => `${l.dep}-${l.des} ${l.carrier} ${l.flight}`)
+              .join(" · ")
+          : null,
       },
-      { label: "Flight Number", value: route ? route[3] : null },
-      { label: "Flight Date", value: route ? isoFromYYMMDD(route[4]) : null },
       {
         label: "Issuing Agent",
         value: agentCity ? `DHL SameDay / Sky Courier, ${agentCity}` : null,

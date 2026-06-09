@@ -106,9 +106,11 @@ const YES_NO_MARKS: Record<string, { Yes: Point; No: Point }> = {
 };
 
 // Example IACs for this workflow use the same full authorized-representative
-// name in both signature-identification roles.
-const AUTHORIZED_REPRESENTATIVE_NAME = "Donald Hill";
-const ID_VERIFIER_NAME = AUTHORIZED_REPRESENTATIVE_NAME;
+// name in both signature-identification roles, per carrier.
+const AUTHORIZED_REPRESENTATIVE_NAMES: Record<IacWorkflowCarrier, string> = {
+  southwest: "Donald Hill",
+  delta: "Torine Lindsey",
+};
 const CARGO_ACCEPTED_FROM_NAME = "Kamel Falak";
 const IAC_AIRLINE_NAMES: Record<IacWorkflowCarrier, string> = {
   southwest: "Southwest Airlines",
@@ -137,6 +139,10 @@ export function ticketToIacValues(
   };
 
   // Text fields we can derive from the ticket.
+  // ID Verification Check: the ID reviewed at pickup is a government-issued photo
+  // ID (driver's license / state ID), so the "Type of ID reviewed" blank reads
+  // "Government".
+  set("Type of ID reviewed", "Government");
   set("Printed name of individual cargo accepted from", CARGO_ACCEPTED_FROM_NAME);
   set("Shipper's Company Name", field("Customer"));
   set("Employer / Company Name", field("Vendor"));
@@ -147,8 +153,9 @@ export function ticketToIacValues(
   set("Date Tendered", field("Flight Date"));
 
   // Known DHL Same Day personnel.
-  set("Authorized Representative / Driver's Name", AUTHORIZED_REPRESENTATIVE_NAME);
-  set("Name of IAC employee who verified ID", ID_VERIFIER_NAME);
+  const representativeName = AUTHORIZED_REPRESENTATIVE_NAMES[carrier];
+  set("Authorized Representative / Driver's Name", representativeName);
+  set("Name of IAC employee who verified ID", representativeName);
 
   // Remaining text fields are completed by the driver at pickup; leave none blank.
   for (const label of Object.keys(FIELD_POSITIONS)) {
