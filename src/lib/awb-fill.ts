@@ -5,6 +5,8 @@
 
 import type { DocumentMapping } from "./documents";
 
+const SOUTHWEST_ACCOUNT_NO = "30021-015";
+
 // Look up a mapped field's value by label, returning null when absent/blank.
 function field(mapping: DocumentMapping, label: string): string | null {
   return mapping.fields.find((f) => f.label === label)?.value ?? null;
@@ -26,10 +28,10 @@ export function iacToAwbValues(
   const carrier = field(mapping, "Carrier");
   const iac = field(mapping, "IAC Number");
 
-  // The indirect air carrier on the IAC certification is the issuing agent that
-  // tenders the cargo, and its TSA-assigned number stands in for the account.
+  // Southwest uses a fixed customer account number on the AWB regardless of
+  // which source document we mapped from.
   set("Issuing Carriers Agent Name and City", carrier);
-  set("Account No", iac);
+  set("Account No", SOUTHWEST_ACCOUNT_NO);
 
   // Pass through any IAC tender fields that happen to be filled in.
   set("Air Waybill Number", field(mapping, "Master Air Waybill"));
@@ -70,6 +72,7 @@ export function ticketToAwbValues(
   set("Shipper Name and Address", field(mapping, "Shipper Name and Address"));
   set("Consignee Name and Address", field(mapping, "Consignee Name and Address"));
   set("Issuing Carriers Agent Name and City", field(mapping, "Issuing Agent"));
+  set("Account No", SOUTHWEST_ACCOUNT_NO);
 
   const carrier = field(mapping, "Carrier");
   set("Carrier1", carrier);
