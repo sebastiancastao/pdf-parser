@@ -4,12 +4,15 @@
 // pdf-lib is server-only; it's listed in `serverExternalPackages`.
 
 import type { DocumentMapping } from "./documents";
+import { identifySouthwestFlightData } from "./southwest-flight-data";
 
 const SOUTHWEST_ACCOUNT_NO = "30021-015";
 
 // Reserved key carried in the values map (not an AcroForm field): text drawn as
 // a positioned overlay just below the shipper's account-number box.
 const SHIPPER_REF_OVERLAY_KEY = "__shipperRefOverlay";
+const FLIGHT_BOX_OVERLAY_LEFT_KEY = "__flightBoxOverlayLeft";
+const FLIGHT_BOX_OVERLAY_RIGHT_KEY = "__flightBoxOverlayRight";
 
 // The Air Waybill is tendered by the Indirect Air Carrier, so the shipper of
 // record is Sky Courier (DHL Same Day) — not the pickup customer — and the
@@ -22,6 +25,42 @@ const SKY_COURIER_ACCOUNT_NO = "30021-15";
 // Look up a mapped field's value by label, returning null when absent/blank.
 function field(mapping: DocumentMapping, label: string): string | null {
   return mapping.fields.find((f) => f.label === label)?.value ?? null;
+}
+
+type FlightLeg = {
+  carrier: string | null;
+  flight: string | null;
+  date: string | null;
+};
+
+// "2026-06-08" / "06/08/26" -> "06/08" for the compact Flight/Date box.
+function shortFlightDate(value: string | null): string | null {
+  if (!value) return null;
+  const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return `${iso[2]}/${iso[3]}`;
+  const md = value.match(/^(\d{1,2})\/(\d{1,2})/);
+  return md ? `${md[1].padStart(2, "0")}/${md[2].padStart(2, "0")}` : value;
+}
+
+// The AWB prints two "Flight/Date" boxes to the right of the destination
+// airport. Each pairs a leg's flight number (prefixed with the airline code
+// when it's a real two-character carrier) with its date, e.g. "WN4394 06/08". A
+// connecting itinerary fills both boxes — leg 1 then leg 2 — while a direct
+// flight fills only the first. The two boxes share one AcroForm field, so each
+// value is drawn as a positioned overlay (see the FLIGHT_BOX_OVERLAY keys in
+// fillAwbForm).
+function setAwbFlightBoxes(out: Record<string, string>, legs: FlightLeg[]) {
+  const boxes = legs
+    .map((leg) => {
+      if (!leg.flight && !leg.date) return "";
+      const code =
+        leg.carrier && /^[A-Z0-9]{2}$/.test(leg.carrier) ? leg.carrier : "";
+      const flight = leg.flight ? `${code}${leg.flight}` : "";
+      return [flight, shortFlightDate(leg.date)].filter(Boolean).join(" ");
+    })
+    .filter(Boolean);
+  if (boxes[0]) out[FLIGHT_BOX_OVERLAY_LEFT_KEY] = boxes[0];
+  if (boxes[1]) out[FLIGHT_BOX_OVERLAY_RIGHT_KEY] = boxes[1];
 }
 
 /**
@@ -39,6 +78,7 @@ export function iacToAwbValues(
 
   const carrier = field(mapping, "Carrier");
   const iac = field(mapping, "IAC Number");
+  const southwestFlights = identifySouthwestFlightData(mapping);
 
   // Southwest uses a fixed customer account number on the AWB regardless of
   // which source document we mapped from.
@@ -49,7 +89,20 @@ export function iacToAwbValues(
   set("Air Waybill Number", field(mapping, "Master Air Waybill"));
   set("Reference Number", field(mapping, "DHL Same Day Job #"));
   set("By First Carrier", field(mapping, "Airline Tendered"));
-  set("Flight Date", field(mapping, "Date Tendered"));
+  setAwbFlightBoxes(
+    out,
+    southwestFlights?.legs.map((leg) => ({
+      carrier: leg.carrierCode,
+      flight: leg.flightNumber,
+      date: leg.flightDate,
+    })) ?? [
+      {
+        carrier: field(mapping, "Carrier"),
+        flight: field(mapping, "Flight Number"),
+        date: field(mapping, "Date Tendered"),
+      },
+    ],
+  );
 
   // Summarise the IAC tender context in the free-text handling box.
   const handling: string[] = [];
@@ -94,6 +147,7 @@ export function ticketToAwbValues(
   set("Issuing Carriers Agent Name and City", field(mapping, "Issuing Agent"));
 
   const carrier = field(mapping, "Carrier");
+  const southwestFlights = identifySouthwestFlightData(mapping);
   set("Carrier1", carrier);
   const origin = field(mapping, "Origin Airport");
   const dest = field(mapping, "Destination Airport");
@@ -104,12 +158,13 @@ export function ticketToAwbValues(
   // fills the second and third carrier boxes; a direct flight fills only the
   // first. Parsed from the "Routing" field; falls back to a single
   // origin→destination leg when that detail isn't available.
-  const routing = field(mapping, "Routing");
-  const legs = routing
-    ? [...routing.matchAll(/([A-Z]{3})-([A-Z]{3})\s+([A-Z]{2})\s+\S+/g)].map(
-        (m) => ({ des: m[2], by: m[3] }),
-      )
-    : [];
+  const legs =
+    southwestFlights?.legs
+      .filter((leg) => leg.destination || leg.carrierCode)
+      .map((leg) => ({
+        des: leg.destination,
+        by: leg.carrierCode,
+      })) ?? [];
   if (legs.length === 0 && dest && carrier) legs.push({ des: dest, by: carrier });
   const legBoxes: Array<[string, string]> = [
     ["To", "By First Carrier"],
@@ -121,7 +176,20 @@ export function ticketToAwbValues(
     set(legBoxes[i][1], leg.by);
   });
 
-  set("Flight Date", field(mapping, "Flight Date"));
+  setAwbFlightBoxes(
+    out,
+    southwestFlights?.legs.map((leg) => ({
+      carrier: leg.carrierCode,
+      flight: leg.flightNumber,
+      date: leg.flightDate,
+    })) ?? [
+      {
+        carrier: field(mapping, "Carrier"),
+        flight: field(mapping, "Flight Number"),
+        date: field(mapping, "Flight Date"),
+      },
+    ],
+  );
 
   // No value declared for carriage.
   set("Declared Value for Carriage", "NVD");
@@ -199,11 +267,27 @@ export async function fillAwbForm(
 
   // Pull out the reserved overlay value; everything else is an AcroForm field.
   const shipperRef = values[SHIPPER_REF_OVERLAY_KEY];
+  const flightBoxLeft = values[FLIGHT_BOX_OVERLAY_LEFT_KEY];
+  const flightBoxRight = values[FLIGHT_BOX_OVERLAY_RIGHT_KEY];
+  const flightBoxRects =
+    flightBoxLeft || flightBoxRight
+      ? form
+          .getTextField("Flight Date")
+          .acroField.getWidgets()
+          .map((widget) => widget.getRectangle())
+          .sort((a, b) => a.x - b.x)
+      : [];
 
   const filled: string[] = [];
   const skipped: string[] = [];
   for (const [name, value] of Object.entries(values)) {
-    if (name === SHIPPER_REF_OVERLAY_KEY) continue;
+    if (
+      name === SHIPPER_REF_OVERLAY_KEY ||
+      name === FLIGHT_BOX_OVERLAY_LEFT_KEY ||
+      name === FLIGHT_BOX_OVERLAY_RIGHT_KEY
+    ) {
+      continue;
+    }
     try {
       const tf = form.getTextField(name);
       tf.setText(value);
@@ -246,6 +330,22 @@ export async function fillAwbForm(
       size: 9,
       font: refFont,
       color: rgb(0, 0, 0),
+    });
+  }
+
+  if (flightBoxRects.length > 0) {
+    const flightFont = await out.embedFont(StandardFonts.Helvetica);
+    const overlayBoxes = [flightBoxLeft, flightBoxRight];
+    overlayBoxes.forEach((value, index) => {
+      const rect = flightBoxRects[index];
+      if (!value || !rect) return;
+      page.drawText(value, {
+        x: rect.x + 2,
+        y: rect.y + 1.5,
+        size: 8,
+        font: flightFont,
+        color: rgb(0, 0, 0),
+      });
     });
   }
 

@@ -88,6 +88,25 @@ function valueAfter(text: string, label: string): string | null {
   return m ? cleanValue(m[1]) : null;
 }
 
+// Pull the text between two printed labels from the whitespace-flattened text.
+// This preserves wrapped values on scanned forms, such as multi-flight entries
+// on the IAC tendering section.
+function valueBetweenLabels(
+  text: string,
+  startLabel: string,
+  endLabel: string | RegExp,
+): string | null {
+  const flat = flatten(text);
+  const endSource =
+    typeof endLabel === "string" ? esc(endLabel) : endLabel.source;
+  const re = new RegExp(
+    `${esc(startLabel)}[^:]*:\\s*(.+?)(?=\\s+(?:${endSource}))`,
+    "i",
+  );
+  const m = flat.match(re);
+  return m ? cleanValue(m[1]) : null;
+}
+
 // First capture group of a pattern over the whitespace-flattened text.
 function capture(text: string, re: RegExp): string | null {
   const m = flatten(text).match(re);
@@ -142,7 +161,24 @@ const DHL_IAC: DocumentDefinition = {
     if (/dhl/.test(name) && /iac/.test(name)) score += 0.2;
     return Math.min(score, 1);
   },
-  extract: ({ text }) => [
+  extract: ({ text }) => {
+    const masterAirWaybill =
+      valueBetweenLabels(text, "Master Air Waybill", "DHL Same Day Job #") ??
+      valueAfter(text, "Master Air Waybill");
+    const dhlJob =
+      valueBetweenLabels(text, "DHL Same Day Job #", "Airline Tendered") ??
+      valueAfter(text, "DHL Same Day Job #");
+    const airlineTendered =
+      valueBetweenLabels(text, "Airline Tendered", "Flight Number") ??
+      valueAfter(text, "Airline Tendered");
+    const flightNumber =
+      valueBetweenLabels(text, "Flight Number", "Date Tendered") ??
+      valueAfter(text, "Flight Number");
+    const dateTendered =
+      valueBetweenLabels(text, "Date Tendered", /CHANGE\s*\d+|$/) ??
+      valueAfter(text, "Date Tendered");
+
+    return [
     {
       label: "IAC Number",
       value:
@@ -174,12 +210,13 @@ const DHL_IAC: DocumentDefinition = {
       label: "Evidence of TSA Certification",
       value: checkbox(text, "SIDA Badge, etc\\.\\):"),
     },
-    { label: "Master Air Waybill", value: valueAfter(text, "Master Air Waybill") },
-    { label: "DHL Same Day Job #", value: valueAfter(text, "DHL Same Day Job #") },
-    { label: "Airline Tendered", value: valueAfter(text, "Airline Tendered") },
-    { label: "Flight Number", value: valueAfter(text, "Flight Number") },
-    { label: "Date Tendered", value: valueAfter(text, "Date Tendered") },
-  ],
+    { label: "Master Air Waybill", value: masterAirWaybill },
+    { label: "DHL Same Day Job #", value: dhlJob },
+    { label: "Airline Tendered", value: airlineTendered },
+    { label: "Flight Number", value: flightNumber },
+    { label: "Date Tendered", value: dateTendered },
+  ];
+  },
 };
 
 const AWB_GUIDE: DocumentDefinition = {
@@ -241,6 +278,61 @@ function composeAddress(block: string | undefined, phone?: string): string | nul
   return phone ? `${lines.join("\n")}\nTel: ${phone}` : lines.join("\n");
 }
 
+type RoutingLeg = {
+  dep: string | null;
+  carrier: string | null;
+  flight: string | null;
+  date: string | null;
+  des: string | null;
+  awb: string | null;
+};
+
+// Parse the routing table's flight legs. A single-leg ticket prints one row
+// ("ATL DL 0987 26/06/08 07:10 09:45 BOS F"), but a connecting itinerary prints
+// the table *column by column*, so every leg's departures stack together, then
+// every carrier, then every flight number, and so on — the per-row regex below
+// would miss all of them. Tokenising the routing block and bucketing each token
+// by its shape recovers the legs for both layouts: the i-th departure, carrier,
+// flight number and date make up leg i. Airports fill two columns (Dep then
+// Des), so the first leg-count codes are departures and the last are
+// destinations; AWB numbers (6+ digits) sit in their own column when present.
+function parseRoutingLegs(text: string): RoutingLeg[] {
+  const block =
+    text.match(/Retr\w+\s+Msg([\s\S]*?)(?:Delivery Date|Notice:|$)/i)?.[1] ?? "";
+
+  const airports: string[] = [];
+  const carriers: string[] = [];
+  const flights: string[] = [];
+  const dates: string[] = [];
+  const awbs: string[] = [];
+  for (const token of block.split(/\s+/)) {
+    if (/^\d{2}\/\d{2}\/\d{2}$/.test(token)) dates.push(token);
+    else if (/^\d{6,}$/.test(token)) awbs.push(token);
+    else if (/^[A-Z]{3}$/.test(token)) airports.push(token);
+    else if (/^(?=[A-Z0-9]*[A-Z])[A-Z0-9]{2}$/.test(token)) carriers.push(token);
+    else if (/^\d{2,4}$/.test(token)) flights.push(token);
+  }
+
+  const legCount = Math.max(
+    dates.length,
+    carriers.length,
+    flights.length,
+    Math.floor(airports.length / 2),
+  );
+  if (legCount === 0) return [];
+
+  const deps = airports.slice(0, legCount);
+  const dests = airports.slice(Math.max(airports.length - legCount, legCount));
+  return Array.from({ length: legCount }, (_, i) => ({
+    dep: deps[i] ?? null,
+    carrier: carriers[i] ?? null,
+    flight: flights[i] ?? null,
+    date: dates[i] ?? null,
+    des: dests[i] ?? null,
+    awb: awbs[i] ?? null,
+  }));
+}
+
 // A DHL SameDay / Sky Courier dispatch & routing ticket. Unlike the IAC
 // certification this carries the full shipment (shipper, consignee, routing,
 // AWB number), so it maps directly onto the Air Waybill form.
@@ -266,23 +358,10 @@ const DHL_SAMEDAY_TICKET: DocumentDefinition = {
       ...text.matchAll(/Phone\s*(\(\d{3}\)\s*\d{3}-?\d{4})/g),
     ].map((m) => m[1]);
 
-    // Routing legs: each "ORIG CARRIER FLT DATE ETD ETA DEST [L] [AWB#]" line. A
-    // connecting itinerary lists more than one (e.g. ATL→MDW then MDW→SFO), so
-    // capture them all: the first leg's origin is the departure and the last
-    // leg's destination is the final airport. Each leg may also carry its own air
-    // waybill number in the routing table's "AWB#" column (after the "L" flag).
-    const legs = [
-      ...text.matchAll(
-        /^([A-Z]{3})\s+([A-Z]{2})\s+(\w+)\s+(\d{2}\/\d{2}\/\d{2})\s+\d{1,2}:\d{2}\s+\d{1,2}:\d{2}\s+([A-Z]{3})(?:\s+[A-Z]\b)?(?:\s+(\d{6,}))?/gm,
-      ),
-    ].map((m) => ({
-      dep: m[1],
-      carrier: m[2],
-      flight: m[3],
-      date: m[4],
-      des: m[5],
-      awb: m[6] ?? null,
-    }));
+    // Routing legs: a connecting itinerary lists more than one (e.g. ATL→DEN
+    // then DEN→SNA), so capture them all — the first leg's origin is the
+    // departure and the last leg's destination is the final airport.
+    const legs = parseRoutingLegs(text);
     const firstLeg = legs[0] ?? null;
     const lastLeg = legs[legs.length - 1] ?? null;
 

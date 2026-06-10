@@ -14,6 +14,7 @@
 // pdf-lib is server-only; it's listed in `serverExternalPackages`.
 
 import type { DocumentMapping } from "./documents";
+import { identifySouthwestFlightData } from "./southwest-flight-data";
 
 export type IacWorkflowCarrier = "southwest" | "delta";
 
@@ -132,6 +133,8 @@ export function ticketToIacValues(
 
   const field = (label: string) =>
     mapping.fields.find((f) => f.label === label)?.value ?? null;
+  const southwestFlights =
+    carrier === "southwest" ? identifySouthwestFlightData(mapping) : null;
 
   const out: Record<string, string> = {};
   const set = (name: string, value: string | null) => {
@@ -149,8 +152,14 @@ export function ticketToIacValues(
   set("Master Air Waybill", field("Air Waybill Number"));
   set("DHL Same Day Job #", field("Ticket Number"));
   set("Airline Tendered", IAC_AIRLINE_NAMES[carrier]);
-  set("Flight Number", field("Flight Number"));
-  set("Date Tendered", field("Flight Date"));
+  set(
+    "Flight Number",
+    southwestFlights?.summary.flightNumbersCompact ?? field("Flight Number"),
+  );
+  set(
+    "Date Tendered",
+    southwestFlights?.summary.tenderDates ?? field("Flight Date"),
+  );
 
   // Known DHL Same Day personnel.
   const representativeName = AUTHORIZED_REPRESENTATIVE_NAMES[carrier];
