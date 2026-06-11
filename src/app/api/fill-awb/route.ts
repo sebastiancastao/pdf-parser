@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { DocumentMapping } from "@/lib/documents";
 import { mappingToAwbValues, fillAwbForm } from "@/lib/awb-fill";
 import { ticketToIacValues, fillIacForm } from "@/lib/iac-fill";
-import { mergePdfs } from "@/lib/pdf-merge";
+import { mergePdfs, duplicatePage } from "@/lib/pdf-merge";
 
 // pdf-lib needs the Node.js runtime.
 export const runtime = "nodejs";
@@ -79,7 +79,11 @@ export async function POST(req: NextRequest) {
     }
 
     const merged = parts.length > 1 ? await mergePdfs(parts) : awb.bytes;
-    return pdfResponse(merged, "Documents_filled.pdf");
+    // The Southwest packet repeats its second page (the IAC certification), so
+    // the output is Air Waybill + IAC + IAC. A single-page packet (no IAC) has
+    // no second page and passes through untouched.
+    const finalPdf = await duplicatePage(merged, 1);
+    return pdfResponse(finalPdf, "Documents_filled.pdf");
   } catch (err) {
     console.error("Document fill failed:", err);
     return NextResponse.json(

@@ -60,14 +60,27 @@ function downloadName(path: string) {
 type Carrier = "southwest" | "delta";
 
 // Download name for the filled PDF, by carrier workflow. Southwest yields the
-// merged Air Waybill + IAC; Delta yields the IAC only.
+// merged Air Waybill + IAC; Delta yields the IAC only. For Southwest we name the
+// file after the job's reference number when one was extracted, falling back to
+// the uploaded file's name when it's missing.
 function filledFileName(path: string, mapping: DocumentMapping, carrier: Carrier) {
   const leaf = path.split("/").pop() ?? path;
+  const stem = leaf.replace(/\.pdf$/i, "");
+
   let suffix = "_AirWaybill";
   if (mapping.type === "dhl-sameday-ticket") {
     suffix = carrier === "delta" ? "_IAC" : "_AirWaybill_IAC";
   }
-  return leaf.replace(/\.pdf$/i, "") + suffix + ".pdf";
+
+  let base = stem;
+  if (carrier === "southwest") {
+    const ref = mapping.fields.find((f) => f.label === "Reference Number")?.value;
+    // Strip anything unsafe for a filename; an empty result falls back to stem.
+    const safeRef = ref ? ref.replace(/[^A-Za-z0-9._-]+/g, "") : "";
+    if (safeRef) base = safeRef;
+  }
+
+  return base + suffix + ".pdf";
 }
 
 // Request the filled PDF for a mapping. Southwest returns the merged Air Waybill

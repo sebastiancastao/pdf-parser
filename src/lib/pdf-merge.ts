@@ -25,3 +25,21 @@ export async function mergePdfs(parts: Uint8Array[]): Promise<Uint8Array> {
   }
   return out.save();
 }
+
+/**
+ * Return a copy of `bytes` with the page at `index` duplicated in place — the
+ * copy is inserted immediately after the original. Used to repeat the second
+ * page (the IAC certification) of the Southwest packet. A no-op when `index`
+ * is out of range, so single-page packets pass through unchanged.
+ */
+export async function duplicatePage(
+  bytes: Uint8Array,
+  index: number,
+): Promise<Uint8Array> {
+  const { PDFDocument } = await import("pdf-lib");
+  const doc = await PDFDocument.load(bytes);
+  if (index < 0 || index >= doc.getPageCount()) return bytes;
+  const [copy] = await doc.copyPages(doc, [index]);
+  doc.insertPage(index + 1, copy);
+  return doc.save();
+}
