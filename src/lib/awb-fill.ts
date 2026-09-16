@@ -214,21 +214,10 @@ export function ticketToAwbValues(
 
   // Piece count, gross weight and chargeable weight are left blank on the
   // Southwest AWB (filled in by the carrier at acceptance).
-  const pieces = field(mapping, "Pieces");
 
-  // Goods description, with part/qty where present.
-  const description = field(mapping, "Description");
-  if (description) {
-    const part = field(mapping, "Part Number");
-    const detail = [
-      part && `Part# ${part}`,
-      pieces && `Qty ${pieces}`,
-    ].filter(Boolean);
-    set(
-      "Nature and Quantity of Goods",
-      detail.length ? `${description}\n${detail.join(" · ")}` : description,
-    );
-  }
+  // Goods description: every Southwest AWB simply reads "Computer Parts"
+  // here, regardless of the mapped document's actual description/part/qty.
+  set("Nature and Quantity of Goods", "Computer Parts");
 
   return out;
 }
